@@ -1,0 +1,24 @@
+# 取得データはリポジトリに含めない。
+# 利用者が fetch_sample.py / fetch_live.py を実行して各自取得する。
+docs/order/
+docs/results/
+data/competition.json
+
+# 大会ロゴも初回 fetch 時に公式サイトから取得する（リポジトリには含めない）
+images/logo5.png
+
+# キャプチャした静止画
+snapshots/
+
+# ログ
+*.log
+
+# OS / エディタ
+.DS_Store
+Thumbs.db
+.vscode/
+__pycache__/
+*.pyc
+
+# ローカル設定（個別のポート等）
+.claude/settings.local.json

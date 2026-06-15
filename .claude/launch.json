@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "irc-overlay",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["server.py", "8099"],
+      "port": 8099
+    }
+  ]
+}

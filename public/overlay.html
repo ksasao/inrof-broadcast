@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1920, initial-scale=1">
+<title>IRC Broadcast Overlay</title>
+
+<!--
+  ============================================================
+   フォントについて【重要・実機検証済み 2026-06】
+  ------------------------------------------------------------
+   ★ Adobe Fonts を「Creative Cloud でPCに同期(デスクトップ)」しても、
+     OBS ブラウザソース(Chromium/CEF) からは font-family 名で参照できません。
+     (Acumin Pro Condensed / Ten Mincho Text は実機で解決不可を確認。
+      これは Adobe Fonts の仕様で、GDI系アプリからのみ見える状態です)
+
+   ★ OBS で本物の Adobe Font を使う唯一の方法は「Web プロジェクト」:
+     1. Adobe Fonts (https://fonts.adobe.com) で Web プロジェクトを作成
+     2. 以下を追加:
+          ・Acumin Pro Condensed (CSS名: acumin-pro-condensed)   … 数字/ラベル
+          ・貂明朝 Text          (CSS名: ten-mincho-text)        … 見出し(任意)
+          ・源ノ角ゴシック JP    (CSS名: source-han-sans-japanese)… 本文/ロボット名
+     3. 発行された <link> を下の行に貼り、コメントを外す
+        （ローカル同期は不要。Web配信なので確実にブラウザで効きます）
+
+   ★ Web プロジェクト未設定でも Google Fonts (Noto Sans JP / Oswald) に
+     自動フォールバックします。Noto Sans JP は源ノ角ゴシックと同一書体の
+     Google版なので、和文は見た目ほぼ同等で TV 品質を保てます。
+  ============================================================
+-->
+<!-- ↓ Adobe Fonts Web プロジェクトの <link> をここに貼る（XXXXXXX を kit ID に） -->
+<!-- <link rel="stylesheet" href="https://use.typekit.net/XXXXXXX.css"> -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&family=Oswald:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+<style>
+:root{
+  /* 各 font-family は「Typekit Web版の名前」→ ローカル実名(保険) → フォールバックの順。
+     ※ローカル同期版はブラウザ(OBS)から参照不可なので、本物を使うには上記の
+       Web プロジェクト <link> が必須。未設定時は Oswald / Noto Sans JP で表示。 */
+  --font-jp: "source-han-sans-japanese","Source Han Sans JP","Noto Sans JP","Yu Gothic",sans-serif;
+  --font-num: "acumin-pro-condensed","Acumin Pro Condensed","Oswald","Yu Gothic",sans-serif;
+  --font-disp: "ten-mincho-text","Ten Mincho Text","source-han-sans-japanese","Noto Sans JP",serif;
+
+  --navy0:#04102e; --navy1:#0a1f52; --navy2:#143a8c;
+  --cyan:#27d6ff; --cyan-d:#0a9fd6;
+  --orange:#ff8a1f; --orange-d:#e0631a;
+  --ink:#0a1730;
+  --gold:#ffd76a;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{font-size:calc(100vw / 1920 * 16px);}     /* 1rem = 16px @1920幅。任意解像度に追従 */
+html,body{width:100%;height:100%;background:transparent;overflow:hidden;}
+body{font-family:var(--font-jp);-webkit-font-smoothing:antialiased;color:#fff;}
+#stage{position:fixed;inset:0;}
+
+/* ===== 常時表示の隅ロゴ (broadcast bug) ===== */
+#bug{
+  position:absolute; top:2.6rem; left:2.6rem;
+  display:flex; align-items:center; gap:1.3rem;
+  padding:.8rem 1.7rem .8rem 1rem;
+  background:linear-gradient(135deg,rgba(8,22,58,.86),rgba(10,31,82,.7));
+  border:1px solid rgba(120,200,255,.25);
+  border-radius:.85rem;
+  backdrop-filter:blur(6px);
+  box-shadow:0 .4rem 1.6rem rgba(0,0,0,.45);
+  overflow:hidden;   /* 周期的な光沢スイープのクリップ用 */
+  opacity:0; transform:translateY(-.8rem); transition:all .5s cubic-bezier(.2,.8,.2,1);
+}
+#bug.show{opacity:1;transform:none;}
+/* 控えめな光沢スイープ(約11秒ごとに一度だけ斜めに通過) */
+#bug::after{
+  content:"";position:absolute;top:0;left:0;width:60%;height:100%;pointer-events:none;
+  background:linear-gradient(105deg,transparent 0%,rgba(255,255,255,.10) 45%,rgba(180,230,255,.18) 50%,rgba(255,255,255,.10) 55%,transparent 100%);
+  transform:translateX(-180%) skewX(-12deg);
+}
+#bug.show::after{animation:bugSheen 33s ease-in-out 2s infinite;}
+@keyframes bugSheen{
+  0%{transform:translateX(-180%) skewX(-12deg);}
+  4%,100%{transform:translateX(320%) skewX(-12deg);}
+}
+#bug .mark{
+  width:3.9rem;height:3.9rem;flex:none;
+  display:grid;place-items:center;position:relative;z-index:1;
+}
+#bug .mark img{width:3.9rem;height:3.9rem;object-fit:contain;
+  filter:drop-shadow(0 0 .7rem rgba(39,214,255,.45));}
+/* ロゴが約9秒ごとにごく僅かに脈動(派手にならない範囲) */
+#bug.show .mark img{animation:bugPulse 9s ease-in-out infinite;}
+@keyframes bugPulse{
+  0%,70%,100%{transform:scale(1);filter:drop-shadow(0 0 .7rem rgba(39,214,255,.45));}
+  82%{transform:scale(1.07);filter:drop-shadow(0 0 1.1rem rgba(39,214,255,.75));}
+}
+#bug .tx{line-height:1.05;position:relative;z-index:1;}
+#bug .tx b{display:block;font-weight:900;font-size:1.5rem;letter-spacing:.02em;}
+#bug .tx span{display:block;font-family:var(--font-num);font-size:1.12rem;letter-spacing:.18em;
+  color:var(--cyan);text-transform:uppercase;margin-top:.18rem;}
+#bug .round{
+  margin-left:.6rem;padding:.42rem 1.1rem;border-radius:.5rem;position:relative;z-index:1;
+  font-family:var(--font-num);font-weight:600;font-size:1.35rem;letter-spacing:.1em;
+  background:linear-gradient(90deg,var(--cyan-d),var(--navy2));
+}
+
+/* ===== テロップ共通 ===== */
+/* inset:0 を base に入れると lower/card の bottom 配置を潰すため、
+   全画面が必要な variant (title/standby) 側で個別に inset:0 を指定する */
+.telop{position:absolute;pointer-events:none;}
+
+/* ---- ロアサード(ロボット個別) ---- */
+.lower{
+  position:absolute; left:3rem; bottom:4.2rem; display:flex; align-items:stretch;
+}
+.lower .accent{
+  width:.55rem;border-radius:.3rem;
+  background:linear-gradient(var(--cyan),var(--cyan-d));
+  transform:scaleY(0);transform-origin:bottom;
+  box-shadow:0 0 1.4rem rgba(39,214,255,.6);
+}
+.lower.masters .accent{background:linear-gradient(var(--orange),var(--orange-d));
+  box-shadow:0 0 1.4rem rgba(255,138,31,.6);}
+.lower .body{
+  margin-left:.8rem; min-width:34rem; max-width:62rem;
+  background:linear-gradient(115deg,rgba(6,18,46,.95) 0%,rgba(12,38,92,.93) 60%,rgba(14,52,120,.9) 100%);
+  border:1px solid rgba(130,200,255,.22);border-left:none;
+  border-radius:.5rem; padding:1.05rem 1.7rem 1.15rem;
+  box-shadow:0 1.2rem 3rem rgba(0,0,0,.5);
+  overflow:hidden;position:relative;
+}
+.lower .body::after{ /* 上部の光沢ライン */
+  content:"";position:absolute;left:0;top:0;height:.16rem;width:100%;
+  background:linear-gradient(90deg,var(--cyan),transparent 70%);
+}
+.lower.masters .body::after{background:linear-gradient(90deg,var(--orange),transparent 70%);}
+.lower .toprow{display:flex;align-items:center;gap:.8rem;margin-bottom:.35rem;}
+.lower .code{
+  font-family:var(--font-num);font-weight:700;font-size:1.5rem;line-height:1;
+  padding:.28rem .7rem;border-radius:.32rem;letter-spacing:.04em;color:#03101f;
+  background:linear-gradient(135deg,var(--cyan),#7fe9ff);
+}
+.lower.masters .code{background:linear-gradient(135deg,var(--orange),#ffc07a);}
+.lower .course{
+  font-family:var(--font-num);font-size:.92rem;font-weight:600;letter-spacing:.22em;
+  text-transform:uppercase;color:var(--cyan);
+}
+.lower.masters .course{color:var(--orange);}
+.lower .name{
+  font-weight:900;font-size:3rem;line-height:1.25;letter-spacing:.01em;
+  padding-bottom:.12em;
+  text-shadow:0 .15rem .5rem rgba(0,0,0,.5);
+}
+.lower .team{
+  display:flex;align-items:center;gap:.6rem;margin-top:.5rem;
+  font-size:1.35rem;font-weight:500;color:#cfe3ff;
+}
+.lower .team .lbl{
+  font-family:var(--font-num);font-size:.82rem;letter-spacing:.18em;color:#7fa8d8;
+  border:1px solid rgba(130,180,240,.4);border-radius:.25rem;padding:.1rem .45rem;
+}
+.lower .ref{
+  margin-top:.7rem;display:inline-flex;align-items:center;gap:.5rem;
+  font-family:var(--font-num);font-size:.95rem;color:var(--gold);letter-spacing:.06em;
+}
+/* 直前ラウンドの成績 */
+.lower .prev{
+  margin-top:.7rem;display:inline-flex;align-items:center;gap:.6rem;
+  font-family:var(--font-num);font-size:1.1rem;color:#dcebff;letter-spacing:.06em;
+}
+.lower .prev b{font-size:1.5rem;font-weight:700;color:#fff;}
+.lower .prev .pdtl{font-size:.95rem;color:#9fc4ee;}
+.lower .prev .plbl{
+  font-size:.85rem;font-weight:600;letter-spacing:.14em;color:#03101f;
+  padding:.18rem .6rem;border-radius:.3rem;
+  background:linear-gradient(135deg,var(--cyan),#7fe9ff);
+}
+.lower.masters .prev .plbl{background:linear-gradient(135deg,var(--orange),#ffc07a);}
+.lower .ref b{font-size:1.4rem;font-weight:700;}
+
+/* ロアサード アニメーション */
+.lower.in .accent{transform:scaleY(1);transition:transform .45s cubic-bezier(.2,.9,.2,1);}
+.lower.in .body{animation:bodyIn .55s cubic-bezier(.2,.85,.2,1) .12s both;}
+.lower.in .toprow{animation:wipe .5s cubic-bezier(.3,.9,.2,1) .34s both;}
+.lower.in .name{animation:wipe .55s cubic-bezier(.3,.9,.2,1) .42s both;}
+.lower.in .team{animation:wipe .5s cubic-bezier(.3,.9,.2,1) .54s both;}
+.lower.in .ref{animation:wipe .5s cubic-bezier(.3,.9,.2,1) .64s both;}
+.lower.in .prev{animation:wipe .5s cubic-bezier(.3,.9,.2,1) .64s both;}
+.lower.out{animation:lowerOut .4s cubic-bezier(.6,0,.8,.2) both;}
+@keyframes bodyIn{from{opacity:0;transform:translateX(-2.5rem)}to{opacity:1;transform:none}}
+/* clip-path を使うと OBS(CEF) でディセンダが切れるため、スライド+フェードで表現 */
+@keyframes wipe{from{opacity:0;transform:translateX(-1.4rem)}to{opacity:1;transform:none}}
+@keyframes lowerOut{to{opacity:0;transform:translateX(-3rem)}}
+
+/* ---- ロボット情報カード(右上) ---- */
+.infocard{position:absolute;right:2.6rem;top:11rem;width:30rem;}
+.infocard .pnl{
+  background:linear-gradient(160deg,rgba(6,18,46,.95),rgba(12,38,92,.93));
+  border:1px solid rgba(130,200,255,.25);border-radius:.7rem;overflow:hidden;
+  box-shadow:0 1rem 3rem rgba(0,0,0,.5);
+  opacity:0;transform:translateX(3rem);
+}
+.infocard .ph{position:relative;width:100%;height:18rem;background:#04102e;overflow:hidden;}
+.infocard .ph img{width:100%;height:100%;object-fit:cover;display:block;}
+.infocard .ph::after{content:"";position:absolute;inset:0;
+  background:linear-gradient(transparent 60%,rgba(8,24,60,.95));}
+.infocard .ph .cap{position:absolute;left:1rem;bottom:.7rem;right:1rem;z-index:1;
+  display:flex;align-items:center;gap:.7rem;}
+.infocard .ph .cap .code{font-family:var(--font-num);font-weight:700;font-size:1.2rem;
+  padding:.2rem .6rem;border-radius:.3rem;color:#03101f;background:linear-gradient(135deg,var(--cyan),#7fe9ff);}
+.infocard.masters .ph .cap .code{background:linear-gradient(135deg,var(--orange),#ffc07a);}
+.infocard .ph .cap .nm{font-weight:900;font-size:1.5rem;text-shadow:0 .1rem .4rem rgba(0,0,0,.7);}
+.infocard .bd{padding:1rem 1.2rem 1.1rem;}
+.infocard .specs{font-family:var(--font-num);font-size:.92rem;color:#9fc4ee;
+  letter-spacing:.02em;margin-bottom:.6rem;line-height:1.4;
+  border-bottom:1px solid rgba(130,180,240,.18);padding-bottom:.6rem;}
+.infocard .sec{margin-top:.55rem;}
+.infocard .sec .lbl{font-family:var(--font-num);font-size:.78rem;letter-spacing:.16em;
+  color:var(--cyan);text-transform:uppercase;margin-bottom:.15rem;}
+.infocard.masters .sec .lbl{color:var(--orange);}
+.infocard .sec .tx{font-size:1.08rem;line-height:1.45;color:#e8f2ff;}
+.infocard.in .pnl{animation:slideInR .55s cubic-bezier(.2,.85,.2,1) .25s both;}
+.infocard.out .pnl{animation:fadeOutR .35s ease both;}
+
+/* ---- 対戦カード ---- */
+.card{position:absolute;left:50%;bottom:4rem;transform:translateX(-50%);width:74rem;}
+.card .head{
+  display:flex;align-items:center;gap:1rem;margin-bottom:.9rem;
+  justify-content:center;
+}
+.card .head .rd{
+  font-family:var(--font-num);font-weight:700;font-size:1.5rem;letter-spacing:.12em;
+  padding:.3rem 1.1rem;border-radius:.4rem;color:#03101f;
+  background:linear-gradient(135deg,var(--cyan),#7fe9ff);
+}
+.card .head .ttl{font-weight:900;font-size:1.9rem;letter-spacing:.03em;}
+.card .head .tm{font-family:var(--font-num);font-size:1.5rem;color:var(--cyan);letter-spacing:.08em;}
+.card .rows{display:flex;gap:1rem;justify-content:center;}
+.card .rb{
+  flex:1;background:linear-gradient(160deg,rgba(8,22,58,.95),rgba(13,40,96,.92));
+  border:1px solid rgba(130,200,255,.22);border-radius:.6rem;
+  padding:1.1rem 1.3rem 1.2rem;position:relative;overflow:hidden;
+  opacity:0;transform:translateY(2rem);
+}
+.card .rb::before{content:"";position:absolute;left:0;top:0;width:100%;height:.3rem;
+  background:linear-gradient(90deg,var(--cyan),var(--cyan-d));}
+.card .rb.masters::before{background:linear-gradient(90deg,var(--orange),var(--orange-d));}
+.card .rb .c{font-family:var(--font-num);font-weight:700;font-size:1.4rem;color:var(--cyan);letter-spacing:.04em;}
+.card .rb.masters .c{color:var(--orange);}
+.card .rb .n{font-weight:900;font-size:1.9rem;line-height:1.2;margin:.3rem 0 .45rem;padding-bottom:.08em;}
+.card .rb .t{font-size:1.15rem;color:#cfe3ff;}
+.card.in .head{animation:fadeDown .6s cubic-bezier(.2,.85,.2,1) both;}
+.card.in .rb{animation:rbIn .6s cubic-bezier(.2,.85,.2,1) both;}
+.card.in .rb:nth-child(1){animation-delay:.12s}
+.card.in .rb:nth-child(2){animation-delay:.24s}
+.card.in .rb:nth-child(3){animation-delay:.36s}
+.card.out{animation:fadeOutUp .4s ease both;}
+@keyframes rbIn{to{opacity:1;transform:none}}
+@keyframes fadeDown{from{opacity:0;transform:translateY(-1.5rem)}to{opacity:1;transform:none}}
+
+/* ---- ラウンドタイトル(全画面) ---- */
+.title{position:absolute;inset:0;display:grid;place-items:center;}
+.title .inner{text-align:center;}
+.title .kick{
+  font-family:var(--font-num);font-size:1.5rem;letter-spacing:.45em;color:var(--cyan);
+  text-transform:uppercase;margin-bottom:1rem;opacity:0;
+}
+.title .main{
+  font-family:var(--font-disp);font-weight:900;font-size:7rem;letter-spacing:.08em;
+  line-height:1;position:relative;display:inline-block;padding:0 .2em;
+}
+.title .main span{display:inline-block;opacity:0;transform:translateY(1.4rem) rotateX(40deg);}
+.title .bar{height:.32rem;width:0;margin:1.5rem auto 0;
+  background:linear-gradient(90deg,transparent,var(--cyan),transparent);}
+.title .sub{margin-top:1rem;font-size:1.5rem;color:#cfe3ff;letter-spacing:.1em;opacity:0;}
+.title.in .kick{animation:fadeDown .7s ease .1s both;}
+.title.in .main span{animation:charIn .6s cubic-bezier(.2,.9,.2,1) both;}
+.title.in .bar{animation:barGrow .8s cubic-bezier(.2,.9,.2,1) .5s both;}
+.title.in .sub{animation:fadeUp .7s ease .7s both;}
+.title.out{animation:fadeZoom .45s ease both;}
+@keyframes charIn{to{opacity:1;transform:none}}
+@keyframes barGrow{to{width:26rem}}
+
+/* ---- ルール説明パネル ---- */
+.rules{position:absolute;right:3rem;top:50%;transform:translateY(-50%);width:40rem;}
+.rules .pnl{
+  background:linear-gradient(160deg,rgba(6,18,46,.95),rgba(12,38,92,.93));
+  border:1px solid rgba(130,200,255,.22);border-radius:.7rem;
+  padding:1.6rem 1.8rem;box-shadow:0 1.4rem 3.4rem rgba(0,0,0,.5);
+  opacity:0;transform:translateX(3rem);
+}
+.rules .h{display:flex;align-items:center;gap:.8rem;margin-bottom:1rem;
+  border-bottom:1px solid rgba(130,200,255,.2);padding-bottom:.8rem;}
+.rules .h .ic{width:2.4rem;height:2.4rem;border-radius:.4rem;flex:none;
+  background:linear-gradient(135deg,var(--cyan),var(--cyan-d));display:grid;place-items:center;
+  font-family:var(--font-num);font-weight:700;color:#03101f;font-size:1.4rem;}
+.rules .h b{font-weight:900;font-size:1.7rem;}
+.rules ul{list-style:none;}
+.rules li{display:flex;align-items:baseline;gap:.8rem;padding:.5rem 0;font-size:1.25rem;
+  border-bottom:1px dashed rgba(130,180,240,.15);}
+.rules li .pt{font-family:var(--font-num);font-weight:700;color:var(--cyan);
+  font-size:1.6rem;min-width:4.5rem;text-align:right;}
+.rules li .pt .u{font-size:.9rem;color:#9fc4ee;margin-left:.15rem;}
+.rules li .d{color:#e8f2ff;}
+.rules.in .pnl{animation:slideInR .55s cubic-bezier(.2,.85,.2,1) both;}
+.rules.in li{animation:fadeUp .5s ease both;}
+.rules.in li:nth-child(1){animation-delay:.2s}
+.rules.in li:nth-child(2){animation-delay:.3s}
+.rules.in li:nth-child(3){animation-delay:.4s}
+.rules.in li:nth-child(4){animation-delay:.5s}
+.rules.in li:nth-child(5){animation-delay:.6s}
+.rules.out{animation:fadeOutR .4s ease both;}
+@keyframes slideInR{to{opacity:1;transform:none}}
+@keyframes fadeOutR{to{opacity:0;transform:translateX(3rem)}}
+
+/* ---- 結果一覧ボード ---- */
+/* top をやや下げて常時表示ロゴ(BUG)との重なりを避ける */
+.results{position:absolute;left:50%;top:calc(50% + 1rem);transform:translate(-50%,-50%);width:111rem;}
+.results.nojudge{width:102rem;}
+.results .pnl{
+  background:linear-gradient(160deg,rgba(6,18,46,.96),rgba(12,38,92,.94));
+  border:1px solid rgba(130,200,255,.22);border-radius:.8rem;
+  box-shadow:0 1.6rem 4rem rgba(0,0,0,.55);overflow:hidden;
+  opacity:0;transform:translateY(2rem);
+}
+.results .hd{
+  display:flex;align-items:center;gap:1rem;padding:1.1rem 1.6rem;
+  background:linear-gradient(90deg,rgba(15,143,196,.35),transparent 70%);
+  border-bottom:1px solid rgba(130,200,255,.25);
+}
+.results.masters .hd{background:linear-gradient(90deg,rgba(224,99,26,.35),transparent 70%);}
+.results .hd .rd{
+  font-family:var(--font-num);font-weight:700;font-size:1.7rem;letter-spacing:.1em;color:#03101f;
+  padding:.35rem 1.1rem;border-radius:.45rem;
+  background:linear-gradient(135deg,var(--cyan),#7fe9ff);
+}
+.results.masters .hd .rd{background:linear-gradient(135deg,var(--orange),#ffc07a);}
+.results .hd b{font-weight:900;font-size:2.3rem;letter-spacing:.03em;}
+.results .hd .cs{margin-left:auto;font-family:var(--font-num);font-size:1.3rem;
+  letter-spacing:.2em;color:var(--cyan);text-transform:uppercase;}
+.results.masters .hd .cs{color:var(--orange);}
+.results .viewport{max-height:44rem;overflow:hidden;position:relative;}
+.results .list{padding:.5rem 0;}
+.results .row{
+  display:flex;align-items:center;gap:1.2rem;padding:.62rem 2rem;
+  font-size:1.7rem;border-bottom:1px dashed rgba(130,180,240,.12);
+}
+.results .row:nth-child(even){background:rgba(130,180,240,.05);}
+.results .row .rk{
+  font-family:var(--font-num);font-weight:700;font-size:2rem;flex:0 0 4rem;
+  text-align:right;color:#9fc4ee;
+}
+.results .row.r1 .rk{color:#ffd76a;}
+.results .row.r2 .rk{color:#d9e4f5;}
+.results .row.r3 .rk{color:#e8a05f;}
+.results .row .cd{
+  font-family:var(--font-num);font-weight:600;font-size:1.5rem;flex:0 0 4.7rem;
+  color:var(--cyan);
+}
+.results.masters .row .cd{color:var(--orange);}
+.results .row .nm{font-weight:700;flex:1;min-width:0;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;}
+.results .row .tm{color:#9fc4ee;font-size:1.35rem;max-width:15rem;flex:0 0 15rem;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+/* 数値カラム共通 */
+.results .row .num{
+  font-family:var(--font-num);font-size:1.6rem;text-align:right;color:#cfe3ff;
+  white-space:nowrap;
+}
+.results .row .c-game{flex:0 0 6rem;}
+.results .row .c-judge{flex:0 0 6rem;}
+.results .row .c-hosei{flex:0 0 4.4rem;color:#9fc4ee;}
+.results .row .c-total{flex:0 0 7.4rem;font-weight:700;font-size:2rem;color:#fff;}
+.results .row .c-time{flex:0 0 7.2rem;color:#9fc4ee;font-size:1.35rem;}
+/* ヘッダ行 */
+.results .rhead{
+  display:flex;align-items:center;gap:1.2rem;padding:.5rem 2rem .45rem;
+  border-bottom:1px solid rgba(130,200,255,.25);
+  font-size:1.05rem;letter-spacing:.12em;color:#7fa8d8;
+}
+.results .rhead>span{text-align:right;white-space:nowrap;}
+.results .rhead .h-rk{flex:0 0 4rem;}
+.results .rhead .h-cd{flex:0 0 4.7rem;text-align:left;}
+.results .rhead .h-nm{flex:1;text-align:left;}
+.results .rhead .h-tm{flex:0 0 15rem;text-align:left;}
+.results .rhead .h-game{flex:0 0 6rem;}
+.results .rhead .h-judge{flex:0 0 6rem;}
+.results .rhead .h-hosei{flex:0 0 4.4rem;}
+.results .rhead .h-total{flex:0 0 7.4rem;}
+.results .rhead .h-time{flex:0 0 7.2rem;}
+.results.in .pnl{animation:rbIn .6s cubic-bezier(.2,.85,.2,1) both;}
+.results.out{animation:fadeOutUp .4s ease both;}
+/* 上下のフェードマスク(スクロール時の見切れを柔らかく) */
+.results .viewport::before,.results .viewport::after{
+  content:"";position:absolute;left:0;right:0;height:1.6rem;z-index:1;pointer-events:none;
+}
+.results .viewport::before{top:0;background:linear-gradient(rgba(7,20,50,.95),transparent);}
+.results .viewport::after{bottom:0;background:linear-gradient(transparent,rgba(8,24,60,.95));}
+
+/* ---- スタンバイ(全画面) ---- */
+.standby{position:absolute;inset:0;display:grid;place-items:center;
+  background:radial-gradient(ellipse at 50% 40%,rgba(12,38,92,.55),rgba(4,16,46,.85) 70%);}
+.standby .inner{text-align:center;opacity:0;}
+.standby .logo{
+  width:13rem;height:13rem;margin:0 auto 1.6rem;
+  display:grid;place-items:center;
+  animation:floaty 4s ease-in-out infinite;
+}
+.standby .logo img{width:13rem;height:13rem;object-fit:contain;
+  filter:drop-shadow(0 0 2rem rgba(39,214,255,.45));}
+.standby .ev{font-weight:900;font-size:4rem;letter-spacing:.04em;}
+.standby .msg{margin-top:1rem;font-family:var(--font-num);font-size:1.7rem;letter-spacing:.3em;
+  color:var(--cyan);text-transform:uppercase;}
+.standby .msg::after{content:"";display:inline-block;width:.4em;animation:dots 1.4s steps(4) infinite;}
+.standby.in .inner{animation:fadeUp .7s ease both;}
+.standby.out{animation:fadeZoom .45s ease both;}
+@keyframes floaty{50%{transform:translateY(-1rem)}}
+@keyframes dots{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}}
+
+/* ---- 汎用ロアサード(自由テキスト) ---- */
+.custom{position:absolute;left:50%;bottom:5rem;transform:translateX(-50%);text-align:center;}
+.custom .box{
+  display:inline-block;padding:1rem 2.6rem;border-radius:.6rem;
+  background:linear-gradient(115deg,rgba(6,18,46,.95),rgba(14,52,120,.9));
+  border:1px solid rgba(130,200,255,.25);box-shadow:0 1rem 3rem rgba(0,0,0,.5);
+  opacity:0;transform:translateY(1.5rem);
+}
+.custom .t{font-weight:900;font-size:2.6rem;letter-spacing:.02em;}
+.custom .s{margin-top:.4rem;font-size:1.4rem;color:#cfe3ff;letter-spacing:.06em;}
+.custom.in .box{animation:fadeUp .55s cubic-bezier(.2,.85,.2,1) both;}
+.custom.out{animation:fadeOutUp .4s ease both;}
+
+/* 共通キーフレーム */
+@keyframes fadeUp{from{opacity:0;transform:translateY(1.4rem)}to{opacity:1;transform:none}}
+@keyframes fadeDownIn{from{opacity:0;transform:translateY(-1.4rem)}to{opacity:1;transform:none}}
+@keyframes fadeOutUp{to{opacity:0;transform:translateY(-1.2rem)}}
+@keyframes fadeZoom{to{opacity:0;transform:scale(1.06)}}
+@keyframes slideUpFade{from{opacity:0;transform:translate(-50%,1.5rem)}to{opacity:1;transform:translate(-50%,0)}}
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="bug">
+    <div class="mark"><img src="/images/logo5.png" alt="logo"></div>
+    <div class="tx"><b>第38回 知能ロボットコンテスト 2026</b><span>Intelligent Robot Contest</span></div>
+    <div class="round" id="bugRound"></div>
+  </div>
+  <div id="telopHost"></div>
+  <div id="infoHost"></div>
+</div>
+
+<script>
+const COURSE_LABEL = {challengers:"CHALLENGERS COURSE", masters:"MASTERS COURSE", other:""};
+const COURSE_JP = {challengers:"チャレンジャーズ", masters:"マスターズ", other:""};
+const esc = s => (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+const host = document.getElementById("telopHost");
+const bug = document.getElementById("bug");
+const bugRound = document.getElementById("bugRound");
+let currentKey = null;
+let currentEl = null;
+
+function classFor(t){ return t.course==="masters" ? "masters" : ""; }
+
+function buildLower(t){
+  const cls = classFor(t);
+  let prev = "";
+  if(t.prev && t.prev.total){
+    const p = t.prev;
+    const detail = p.judge ? ` <span class="pdtl">(競:${esc(p.game)}, 審:${esc(p.judge)})</span>` : "";
+    prev = `<div class="prev"><span class="plbl">${esc(p.round)}</span><b>${esc(p.total)}</b> 点${detail}${p.rank?` ・ ${esc(p.rank)}位${p.n?` / ${esc(p.n)}チーム`:""}`:""}</div>`;
+  }
+  let ref = "";
+  // 直前の試合結果がある場合はそちらを優先し、前回大会の参考記録は出さない
+  if(!prev && t.ref && t.ref.best){
+    ref = `<div class="ref">参考記録 (前回大会) <b>${esc(t.ref.best)}</b> 点${t.ref.rank?` ・ ${esc(t.ref.rank)}位`:""}</div>`;
+  }
+  const note = t.note ? `<div class="ref">${esc(t.note)}</div>` : "";
+  const el = document.createElement("div");
+  el.className = "telop lower " + cls;
+  el.innerHTML = `
+    <div class="accent"></div>
+    <div class="body">
+      <div class="toprow">
+        <span class="code">${esc(t.code)}</span>
+        <span class="course">${COURSE_LABEL[t.course]||""}</span>
+      </div>
+      <div class="name">${esc(t.name)}</div>
+      <div class="team"><span class="lbl">TEAM</span>${esc(t.team)}</div>
+      ${prev}${ref}${note}
+    </div>`;
+  return el;
+}
+
+function buildCard(t){
+  const rows = (t.robots||[]).map(r=>`
+    <div class="rb ${r.course==="masters"?"masters":""}">
+      <div class="c">${esc(r.code)}</div>
+      <div class="n">${esc(r.name)}</div>
+      <div class="t">${esc(r.team)}</div>
+    </div>`).join("");
+  const el = document.createElement("div");
+  el.className = "telop card";
+  el.innerHTML = `
+    <div class="head">
+      <span class="rd">${esc(t.round||"")}</span>
+      <span class="ttl">第${esc(t.no||"")}競技</span>
+      ${t.time?`<span class="tm">${esc(t.time)}</span>`:""}
+    </div>
+    <div class="rows">${rows}</div>`;
+  return el;
+}
+
+function buildTitle(t){
+  const main = (t.main||"").split("").map(c=>`<span>${c===" "?"&nbsp;":esc(c)}</span>`).join("");
+  const el = document.createElement("div");
+  el.className = "telop title";
+  el.innerHTML = `<div class="inner">
+    <div class="kick">${esc(t.kick||"INTELLIGENT ROBOT CONTEST 2026")}</div>
+    <div class="main">${main}</div>
+    <div class="bar"></div>
+    ${t.sub?`<div class="sub">${esc(t.sub)}</div>`:""}
+  </div>`;
+  // 文字ごとのディレイ
+  setTimeout(()=>el.querySelectorAll(".main span").forEach((s,i)=>s.style.animationDelay=(0.15+i*0.045)+"s"),0);
+  return el;
+}
+
+function buildRules(t){
+  const items = (t.items||DEFAULT_RULES).map(it=>`
+    <li><span class="pt">${esc(it.pt)}<span class="u">${esc(it.u||"点")}</span></span>
+        <span class="d">${esc(it.d)}</span></li>`).join("");
+  const el = document.createElement("div");
+  el.className = "telop rules";
+  el.innerHTML = `<div class="pnl">
+    <div class="h"><span class="ic">!</span><b>${esc(t.title||"得点ルール")}</b></div>
+    <ul>${items}</ul></div>`;
+  return el;
+}
+
+function buildResults(t){
+  const masters = t.course === "masters";
+  // 審査点が1件でもあるラウンドのみ「審査」列を出す (一次予選・敗者復活戦は非表示)
+  const hasJudge = (t.rows||[]).some(r=>r.judge);
+  const jh = hasJudge ? `<span class="h-judge">審査</span>` : "";
+  const rows = (t.rows||[]).map((r,i)=>{
+    const jc = hasJudge ? `<span class="num c-judge">${esc(r.judge||"-")}</span>` : "";
+    return `<div class="row r${i+1}">
+      <span class="rk">${i+1}</span>
+      <span class="cd">${esc(r.code)}</span>
+      <span class="nm">${esc(r.name)}</span>
+      <span class="tm">${esc(r.team)}</span>
+      <span class="num c-game">${esc(r.game||"-")}</span>
+      ${jc}
+      <span class="num c-hosei">${esc(r.hosei||"-")}</span>
+      <span class="num c-total">${esc(r.total)}</span>
+      <span class="num c-time">${esc(r.time||"-")}</span>
+    </div>`;
+  }).join("");
+  const el = document.createElement("div");
+  el.className = "telop results " + (masters ? "masters" : "") + (hasJudge ? "" : " nojudge");
+  el.innerHTML = `<div class="pnl">
+    <div class="hd">
+      <span class="rd">${esc(t.round||"")}</span>
+      <b>競技結果</b>
+      <span class="cs">${masters?"MASTERS COURSE":"CHALLENGERS COURSE"}</span>
+    </div>
+    <div class="rhead">
+      <span class="h-rk">順位</span><span class="h-cd">ID</span>
+      <span class="h-nm">ロボット名</span><span class="h-tm">チーム</span>
+      <span class="h-game">競技</span>${jh}<span class="h-hosei">補正</span>
+      <span class="h-total">合計</span><span class="h-time">残り時間</span>
+    </div>
+    <div class="viewport"><div class="list">${rows}</div></div>
+  </div>`;
+  // 自動スクロール: リストが収まらない場合のみ、静止→下端まで→静止→先頭へ を繰り返す
+  setTimeout(()=>{
+    const vp = el.querySelector(".viewport");
+    const list = el.querySelector(".list");
+    const over = list.scrollHeight - vp.clientHeight;
+    if(over > 8){
+      const scrollSec = over / 30;            // 30px/秒 でゆっくり
+      const holdSec = 3;                      // 上端/下端での静止時間
+      const total = (holdSec*2 + scrollSec*2) * 1000;
+      const f = (sec)=>sec*1000/total;        // 秒 -> offset
+      list.animate([
+        {transform:"translateY(0)", offset:0},
+        {transform:"translateY(0)", offset:f(holdSec)},
+        {transform:`translateY(-${over}px)`, offset:f(holdSec+scrollSec)},
+        {transform:`translateY(-${over}px)`, offset:f(holdSec*2+scrollSec)},
+        {transform:"translateY(0)", offset:1},
+      ], {duration: total, iterations: Infinity, easing:"linear"});
+    }
+  }, 900);   // 入場アニメーション完了後に開始
+  return el;
+}
+
+function buildStandby(t){
+  const el = document.createElement("div");
+  el.className = "telop standby";
+  el.innerHTML = `<div class="inner">
+    <div class="logo"><img src="/images/logo5.png" alt="logo"></div>
+    <div class="ev">${esc(t.ev||"知能ロボットコンテスト 2026")}</div>
+    <div class="msg">${esc(t.msg||"まもなく開始")}</div>
+  </div>`;
+  return el;
+}
+
+function buildCustom(t){
+  const el = document.createElement("div");
+  el.className = "telop custom";
+  el.innerHTML = `<div class="box"><div class="t">${esc(t.title||"")}</div>
+    ${t.sub?`<div class="s">${esc(t.sub)}</div>`:""}</div>`;
+  return el;
+}
+
+const DEFAULT_RULES = [
+  {pt:"3", d:"ボールを正しい色のゴールへ"},
+  {pt:"1", d:"ボールを異なる色のゴールへ"},
+  {pt:"5", d:"自由ボールをいずれかのゴールへ"},
+  {pt:"10", d:"リターンボーナス(マスターズ)"},
+  {pt:"80", d:"チャレンジャーズ 最大得点"},
+];
+
+function render(telop){
+  const key = JSON.stringify(telop);
+  if(key === currentKey) return;
+  currentKey = key;
+
+  const prev = currentEl;
+  if(prev){
+    prev.classList.remove("in");
+    prev.classList.add("out");
+    setTimeout(()=>{ if(prev.parentNode) prev.parentNode.removeChild(prev); }, 450);
+  }
+
+  let el = null;
+  switch(telop.type){
+    case "robot":   el = buildLower(telop); break;
+    case "match":   el = buildCard(telop); break;
+    case "title":   el = buildTitle(telop); break;
+    case "rules":   el = buildRules(telop); break;
+    case "standby": el = buildStandby(telop); break;
+    case "results": el = buildResults(telop); break;
+    case "custom":  el = buildCustom(telop); break;
+    default: el = null;
+  }
+  currentEl = el;
+  if(!el) return;
+  // 前のテロップが消えてから入場(切替を被らせない)
+  const delay = prev ? 380 : 0;
+  setTimeout(()=>{
+    host.appendChild(el);
+    void el.offsetWidth;      // reflow
+    el.classList.add("in");
+  }, delay);
+}
+
+function applyBug(b){
+  if(b && b.show){ bug.classList.add("show"); }
+  else { bug.classList.remove("show"); }
+  bugRound.textContent = (b && b.round) ? b.round : "";
+  bugRound.style.display = (b && b.round) ? "" : "none";
+}
+
+// ===== ロボット情報カード(右上) =====
+const infoHost = document.getElementById("infoHost");
+let infoKey = null, infoEl = null;
+function buildInfo(t){
+  const info = t.info||{};
+  const masters = t.course==="masters";
+  const img = info.image ? `<div class="ph"><img src="${esc(info.image)}" alt="">
+      <div class="cap"><span class="code">${esc(t.code)}</span><span class="nm">${esc(t.name)}</span></div></div>` : "";
+  const specs = info.specs ? `<div class="specs">${esc(info.specs)}</div>` : "";
+  const appeal = info.appeal ? `<div class="sec"><div class="lbl">Appeal / アピール</div><div class="tx">${esc(info.appeal)}</div></div>` : "";
+  const feat = info.features ? `<div class="sec"><div class="lbl">Features / 特徴</div><div class="tx">${esc(info.features)}</div></div>` : "";
+  const el = document.createElement("div");
+  el.className = "infocard " + (masters?"masters":"");
+  el.innerHTML = `<div class="pnl">${img}<div class="bd">${specs}${appeal}${feat}</div></div>`;
+  return el;
+}
+function renderInfo(show, telop){
+  const t = telop||{};
+  const visible = show && t.type==="robot" && t.info &&
+                  (t.info.image || t.info.appeal || t.info.features || t.info.specs);
+  const key = visible ? JSON.stringify({c:t.code, i:t.info}) : null;
+  if(key === infoKey) return;
+  infoKey = key;
+  const prev = infoEl;
+  if(prev){ prev.classList.remove("in"); prev.classList.add("out");
+    setTimeout(()=>{ if(prev.parentNode) prev.parentNode.removeChild(prev); }, 360); }
+  if(!visible){ infoEl = null; return; }
+  const el = buildInfo(t);
+  infoEl = el;
+  setTimeout(()=>{ infoHost.appendChild(el); void el.offsetWidth; el.classList.add("in"); }, prev?300:0);
+}
+
+function apply(state){
+  applyBug(state.bug||{});
+  render(state.telop||{type:"none"});
+  renderInfo(!!state.showInfo, state.telop||{});
+}
+
+// ===== SSE 接続 =====
+let es;
+function connect(){
+  es = new EventSource("/api/events");
+  es.onmessage = e => { try{ apply(JSON.parse(e.data)); }catch(err){} };
+  es.onerror = () => { es.close(); setTimeout(connect, 2000); };
+}
+connect();
+</script>
+</body>
+</html>
